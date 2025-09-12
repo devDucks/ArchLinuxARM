@@ -1,0 +1,98 @@
+# syntax=docker/dockerfile:1.7
+
+###############################################
+# QEMU STATIC (lets x86_64 run arm64 userland)
+###############################################
+FROM multiarch/qemu-user-static:latest AS qemu
+
+###############################################
+# BUILDER (Alpine) -> bootstrap ArchLinuxARM rootfs
+###############################################
+FROM alpine:3.20 AS builder
+
+RUN apk add --no-cache \
+      pacman \
+      arch-install-scripts \
+      gnupg \
+      curl \
+      xz \
+      zstd \
+      tar \
+      ca-certificates
+
+ENV OUT=/out
+ENV PAC=/work/pacman
+RUN mkdir -p ${OUT} ${OUT}/var/lib/pacman ${PAC}/cache ${PAC}/log ${PAC}/gnupg /etc/pacman.d
+
+# --- Pacman config targeting ArchLinuxARM (aarch64) ---
+# IMPORTANT: DBPath points INSIDE the target rootfs so installed packages are registered there.
+RUN cat > /etc/pacman.conf <<'EOF'
+[options]
+RootDir     = /out
+DBPath      = /out/var/lib/pacman
+CacheDir    = /work/pacman/cache
+LogFile     = /work/pacman/log/pacman.log
+GPGDir      = /work/pacman/gnupg
+Architecture = aarch64
+ParallelDownloads = 5
+# Optional in containers:
+CheckSpace
+# First pass without signatures (to fetch the keyring)
+SigLevel = Never
+
+[core]
+Server = http://mirror.archlinuxarm.org/$arch/$repo
+[extra]
+Server = http://mirror.archlinuxarm.org/$arch/$repo
+[community]
+Server = http://mirror.archlinuxarm.org/$arch/$repo
+EOF
+
+# --- Bootstrap: fetch ALARM keyring with sigs disabled ---
+RUN pacman --config /etc/pacman.conf -Sy --noconfirm archlinuxarm-keyring
+
+# Initialize host keyring to trust ArchLinuxARM keys for the *builder* pacman
+RUN mkdir -p /usr/share/pacman/keyrings && \
+    cp -av ${OUT}/usr/share/pacman/keyrings/* /usr/share/pacman/keyrings/ && \
+    pacman-key --gpgdir ${PAC}/gnupg --init && \
+    pacman-key --gpgdir ${PAC}/gnupg --populate archlinuxarm
+
+# Harden pacman to require signatures now (builder pacman)
+RUN sed -i 's/^SigLevel.*/SigLevel = Required DatabaseOptional/' /etc/pacman.conf $OUT/etc/pacman.conf
+RUN sed -i 's/#DisableSandbox/DisableSandbox/' /etc/pacman.conf $OUT/etc/pacman.conf
+
+# --- Install the userland into /out (DB gets written to /out/var/lib/pacman) ---
+# NOTE: explicitly include bash (base alone may not provide it)
+RUN pacman --config /etc/pacman.conf -Syu --noconfirm base zsh
+
+RUN printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\noptions edns0\n' > /etc/resolv.conf || true
+
+# Optional locale scaffolding
+RUN echo "en_US.UTF-8 UTF-8" > ${OUT}/etc/locale.gen && \
+    echo "LANG=en_US.UTF-8"   > ${OUT}/etc/locale.conf || true
+
+# Slim down (remove sync dbs, keep local db intact under /out/var/lib/pacman/local)
+RUN rm -rf ${PAC}/cache/* ${OUT}/var/lib/pacman/sync/*
+
+# Optional: export rootfs tarball artifact
+RUN tar -C ${OUT} -cpf /archlinuxarm-aarch64-rootfs.tar .
+
+###############################################
+# FINAL: runnable ArchLinuxARM rootfs (aarch64)
+###############################################
+FROM scratch AS archarm
+# qemu static so this runs on x86_64 (requires binfmt installed on host)
+COPY --from=qemu    /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64-static
+# the Arch ARM rootfs (with local pacman DB inside it)
+COPY --from=builder /out/ /
+
+ENV LANG=en_US.UTF-8 \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CMD ["/usr/bin/zsh"]
+
+###############################################
+# EXPORT-ONLY: tarball artifact stage
+###############################################
+FROM scratch AS export
+COPY --from=builder /archlinuxarm-aarch64-rootfs.tar /archlinuxarm-aarch64-rootfs.tar
