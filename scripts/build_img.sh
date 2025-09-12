@@ -41,8 +41,6 @@ sudo mkfs.ext4 -F -L "$ROOT_LABEL" "$ROOT_DEV"
 
 BOOT_UUID=$(sudo blkid -s UUID -o value "$BOOT_DEV")
 ROOT_UUID=$(sudo blkid -s UUID -o value "$ROOT_DEV")
-echo "BOOT UUID is $BOOT_UUID"
-echo "ROOT UUID is $ROOT_UUID"
 
 # --- mount ---
 sudo mkdir -p /mnt/arch-root /mnt/arch-boot
