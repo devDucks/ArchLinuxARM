@@ -80,8 +80,8 @@ jobs:
           # Your local command used --load; in CI we push instead. (--load is single-arch only and not suited for multi-arch CI.)
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: true
-          sbom: true
+          provenance: false
+          sbom: false
 
       # Optional: attest the pushed image (supply chain)
       - name: Attest image (SLSA-style)
