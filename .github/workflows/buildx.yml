@@ -81,12 +81,3 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
           sbom: false
-
-      # Optional: attest the pushed image (supply chain)
-      - name: Attest image (SLSA-style)
-        if: github.event_name != 'pull_request'
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.buildx.outputs.digest }}
-          push-to-registry: true
