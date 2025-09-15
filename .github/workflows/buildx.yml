@@ -19,7 +19,6 @@ env:
   PLATFORMS: linux/arm64
   DOCKERFILE: dockerfiles/Dockerfile.base
   TARGET: archarm
-  TAG_SUFFIX: minimal-aarch64
 
 jobs:
   build:
@@ -58,15 +57,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.img.outputs.IMAGE }}
-          flavor: |
-            suffix=-${{ env.TAG_SUFFIX }},onlatest=true
           # Tag strategy:
           # - main branch -> :latest and :sha
           # - tags like v1.2.3 -> :1.2.3 and :1.2 and :1
           # - PRs -> :pr-<num>-<sha>
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short,prefix=,suffix=,enable={{is_default_branch}}
             type=ref,event=tag
             type=ref,event=pr
 
