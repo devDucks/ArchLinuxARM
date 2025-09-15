@@ -15,7 +15,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: ${{ github.owner_repository }}/archlinuxarm-basic
   PLATFORMS: linux/arm64
   DOCKERFILE: dockerfiles/Dockerfile.base
   TARGET: archarm
