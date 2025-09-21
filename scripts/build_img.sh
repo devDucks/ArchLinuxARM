@@ -3,7 +3,7 @@ set -euo pipefail
 
 # --- settings ---
 IMG=${IMG:-archarm-rpi-aarch64.img}
-SIZE=${SIZE:-4G}          # total image size
+SIZE=${SIZE:-20G}         # total image size
 BOOT_MB=${BOOT_MB:-768}   # FAT32 /boot size in MiB
 ROOT_LABEL=${ROOT_LABEL:-ALARM_ROOT}
 BOOT_LABEL=${BOOT_LABEL:-ALARM_BOOT}
