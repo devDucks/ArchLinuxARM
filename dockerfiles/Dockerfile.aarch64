@@ -1,0 +1,66 @@
+FROM ghcr.io/devducks/archlinuxarm-basic:latest AS builder
+
+ARG KERNEL
+ARG SERIAL_TTY=ttyAMA1
+
+RUN pacman-key --init && pacman-key --populate archlinuxarm
+
+RUN pacman -Syu --noconfirm
+
+# Install now the linux-rpi (Kernel for RPi)
+RUN pacman -Sy ${KERNEL} openssh --noconfirm
+
+# Prepare network to be started with systemd-networkd with dhcp
+RUN mkdir -p /etc/systemd/network && \
+    mkdir -p /etc/systemd/system/network-online.target.wants  && \
+    mkdir -p /etc/systemd/system/sysinit.target.wants
+
+RUN printf '[Match]\nName=en*\n\n[Network]\nDHCP=yes\nDNSSEC=no\n' > /etc/systemd/network/en.network && \
+    printf '[Match]\nName=eth*\n\n[Network]\nDHCP=yes\nDNSSEC=no\n' > /etc/systemd/network/eth.network
+
+RUN ln -sf /usr/lib/systemd/system/systemd-networkd.service /etc/systemd/system/dbus-org.freedesktop.network1.service && \
+    ln -sf /usr/lib/systemd/system/systemd-resolved.service /etc/systemd/system/dbus-org.freedesktop.resolve1.service && \
+    ln -sf /usr/lib/systemd/system/systemd-timesyncd.service /etc/systemd/system/dbus-org.freedesktop.timesync1.service && \
+    ln -sf /usr/lib/systemd/system/systemd-networkd.service /etc/systemd/system/multi-user.target.wants/systemd-networkd.service  && \
+    ln -sf /usr/lib/systemd/system/systemd-networkd.socket /etc/systemd/system/sockets.target.wants/systemd-networkd.socket  && \
+    ln -sf /usr/lib/systemd/system/systemd-network-generator.service /etc/systemd/system/sysinit.target.wants/systemd-network-generator.service  && \
+    ln -sf /usr/lib/systemd/system/systemd-networkd-wait-online.service /etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service
+
+RUN mkdir -p /etc/ssh/sshd_config.d && \
+    printf '%s\n' \
+      'PermitRootLogin yes' \
+      'PasswordAuthentication yes' \
+      'UsePAM yes' \
+      'ChallengeResponseAuthentication no' \
+      'KbdInteractiveAuthentication no' \
+      'X11Forwarding no' \
+      'PrintMotd no' \
+      'ClientAliveInterval 120' \
+      'ClientAliveCountMax 2' \
+      > /etc/ssh/sshd_config.d/10-root-password.conf
+
+# Set root password interactively or fixed
+# (replace "changeme" with your actual password)
+RUN echo "root:alarm" | chpasswd
+
+RUN ln -sf /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
+
+# Cleanup pacman-key init
+RUN rm -rf /etc/pacman.d/gnupg*
+
+# Create rootfs
+RUN tar -cpf /rootfs.tar \
+  --numeric-owner --xattrs --acls --one-file-system \
+  --sort=name --mtime='UTC 2020-01-01' \
+  --exclude=/proc --exclude=/sys --exclude=/dev \
+  --exclude=/mnt --exclude=/media --exclude=/run \
+  --exclude=/tmp/* --exclude=/var/tmp/* \
+  --exclude=/var/cache/pacman/pkg/* \
+  --exclude=/var/log/* \
+  /
+
+###############################################
+# EXPORT-ONLY: tarball artifact stage
+###############################################
+FROM scratch AS export
+COPY --from=builder /rootfs.tar /archlinuxarm-rpi-aarch64-rootfs.tar
