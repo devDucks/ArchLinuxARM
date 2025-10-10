@@ -41,11 +41,11 @@ CheckSpace
 SigLevel = Never
 
 [core]
-Server = http://mirror.archlinuxarm.org/$arch/$repo
+Server = http://fl.us.mirror.archlinuxarm.org/$arch/$repo
 [extra]
-Server = http://mirror.archlinuxarm.org/$arch/$repo
+Server = http://fl.us.mirror.archlinuxarm.org/$arch/$repo
 [community]
-Server = http://mirror.archlinuxarm.org/$arch/$repo
+Server = http://fl.us.mirror.archlinuxarm.org/$arch/$repo
 EOF
 
 # --- Bootstrap: fetch ALARM keyring with sigs disabled ---
