@@ -1,0 +1,120 @@
+FROM ghcr.io/devducks/archlinuxarm:latest AS builder
+
+# Push the astromatto repo so we can pull whatever package into docker immediately
+RUN sed -i 's|\[core\]|\[astromatto\]\nSigLevel = Optional TrustAll\nServer = http://astroarch.astromatto.com:9000/$arch\n\n\[core\]|' /etc/pacman.conf
+
+# We love candies, don't we?
+RUN sed -i 's|ParallelDownloads = 5|ParallelDownloads = 5\nILoveCandy|g' /etc/pacman.conf
+
+# Disable timeouts for slow downloads
+RUN sed -i 's|ParallelDownloads = 5|ParallelDownloads = 5\nDisableDownloadTimeout|g' /etc/pacman.conf
+
+RUN pacman-key --init && pacman-key --populate archlinuxarm
+
+RUN pacman -Syu --noconfirm
+
+RUN pacman -Sy \
+    arandr \
+    astroarch-onboarding \
+    astroarch-status-notifications \
+    astrometry.net \
+    astromonitor \
+    astro_dmx \
+    breeze-icons \
+    chrony \
+    cloud-guest-utils \
+    cowsay \
+    dhcp \
+    dhcpcd \
+    discover \
+    dnsmasq \
+    dolphin \
+    firefox \
+    flatpak \
+    fortune-mod \
+    fuse2 \
+    glibc \
+    gnu-free-fonts \
+    gpsd \
+    gsc \
+    hicolor-icon-theme \
+    i2c-tools \
+    indiserver-ui \
+    indi-3rdparty-drivers \
+    indi-3rdparty-libs \
+    iw \
+    jq \
+    kate \
+    kdialog \
+    kgpg \
+    konsole \
+    knewstuff \
+    knotifyconfig \
+    kplotting \
+    kscreen \
+    kstars \
+    ksystemlog \
+    kwalletmanager \
+    neofetch \
+    networkmanager \
+    network-manager-applet \
+    networkmanager-qt \
+    novnc \
+    openssh \
+    openssl-1.1 \
+    packagekit-qt6 \
+    pacman-contrib \
+    paru \
+    phd2 \
+    pipewire-jack \
+    plasma-desktop \
+    plasma-nm \
+    plasma-systemmonitor \
+    plasma-x11-session \
+    qt6ct \
+    qt6-datavis3d \
+    qt6-serialbus \
+    qt6-serialport \
+    qt6-websockets \
+    qtkeychain \
+    samba \
+    sddm \
+    sddm-kcm \
+    stellarsolver \
+    tigervnc \
+    uboot-tools \
+    udisks2 \
+    usbutils \
+    websockify \
+    wireplumber \
+    xf86-video-dummy \
+    xf86-video-fbdev \
+    xorg \
+    xorg-fonts-misc \
+    xplanet \
+    zsh \
+    --noconfirm
+
+# Cleanup pacman-key init
+RUN rm -rf /etc/pacman.d/gnupg*
+
+####################################
+# Only needed to retrieve a rootfs #
+####################################
+FROM builder AS rootfs-builder
+# Create rootfs
+RUN tar -cpf /rootfs.tar \
+  --numeric-owner --xattrs --acls --one-file-system \
+  --sort=name --mtime='UTC 2020-01-01' \
+  --exclude=/proc --exclude=/sys --exclude=/dev \
+  --exclude=/mnt --exclude=/media --exclude=/run \
+  --exclude=/tmp/* --exclude=/var/tmp/* \
+  --exclude=/var/cache/pacman/pkg/* \
+  --exclude=/var/log/* \
+  /
+
+###############################################
+# EXPORT-ONLY: tarball artifact stage
+###############################################
+FROM scratch AS astroarch-rootfs
+COPY --from=rootfs-builder /rootfs.tar /astroarch-rootfs.tar
