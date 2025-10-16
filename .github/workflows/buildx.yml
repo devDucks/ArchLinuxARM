@@ -15,9 +15,11 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/archlinuxarm-basic
+  MINIMAL_IMAGE_NAME: ${{ github.repository_owner }}/archlinuxarm-basic
+  ALARM_IMAGE_NAME: ${{ github.repository_owner }}/archlinuxarm
   PLATFORMS: linux/arm64
-  DOCKERFILE: dockerfiles/Dockerfile.base
+  MINIMAL_DOCKERFILE: dockerfiles/Dockerfile.base
+  ALARM_DOCKERFILE: dockerfiles/Dockerfile.aarch64
   TARGET: archarm
 
 jobs:
@@ -50,13 +52,14 @@ jobs:
       - name: Derive image name
         id: img
         run: |
-          echo "IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> $GITHUB_OUTPUT
+          echo "MINIMAL_IMAGE=${{ env.REGISTRY }}/${{ env.MINIMAL_IMAGE_NAME }}" >> $GITHUB_OUTPUT
+          echo "ALARM_IMAGE=${{ env.REGISTRY }}/${{ env.ALARM_IMAGE_NAME }}" >> $GITHUB_OUTPUT
 
       - name: Extract Docker metadata (tags, labels)
-        id: meta
+        id: meta-minimal
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.img.outputs.IMAGE }}
+          images: ${{ steps.img.outputs.MINIMAL_IMAGE }}
           # Tag strategy:
           # - main branch -> :latest and :sha
           # - tags like v1.2.3 -> :1.2.3 and :1.2 and :1
@@ -65,17 +68,46 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
 
-      - name: Build (and push when not a PR)
+      - name: Extract Docker metadata (tags, labels)
+        id: meta-alarm
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.ALARM_IMAGE }}
+          # Tag strategy:
+          # - main branch -> :latest and :sha
+          # - tags like v1.2.3 -> :1.2.3 and :1.2 and :1
+          # - PRs -> :pr-<num>-<sha>
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+
+      - name: Build minimal (and push when not a PR)
         id: buildx
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ env.DOCKERFILE }}
+          file: ${{ env.MINIMAL_DOCKERFILE }}
           target: ${{ env.TARGET }}
           platforms: ${{ env.PLATFORMS }}
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}      # mirrors: -t $(IMAGE):minimal-aarch64 (+ semver / sha variants)
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta-minimal.outputs.tags }}      # mirrors: -t $(IMAGE):minimal-aarch64 (+ semver / sha variants)
+          labels: ${{ steps.meta-minimal.outputs.labels }}
+          # Your local command used --load; in CI we push instead. (--load is single-arch only and not suited for multi-arch CI.)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+
+      - name: Build ArchLinuxARM (and push when not a PR)
+        id: buildx
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ env.ALARM_DOCKERFILE }}
+          platforms: ${{ env.PLATFORMS }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-alarm.outputs.tags }}      # mirrors: -t $(IMAGE):minimal-aarch64 (+ semver / sha variants)
+          labels: ${{ steps.meta-alarm.outputs.labels }}
           # Your local command used --load; in CI we push instead. (--load is single-arch only and not suited for multi-arch CI.)
           cache-from: type=gha
           cache-to: type=gha,mode=max
