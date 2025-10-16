@@ -100,7 +100,7 @@ jobs:
           sbom: false
 
       - name: Build ArchLinuxARM (and push when not a PR)
-        id: buildx
+        id: buildx-alarm
         uses: docker/build-push-action@v6
         with:
           context: .
