@@ -1,14 +1,20 @@
 FROM ghcr.io/devducks/archlinuxarm-basic:latest AS builder
 
-ARG KERNEL
-ARG SERIAL_TTY=ttyAMA1
+RUN printf 'Server = http://dk.mirror.archlinuxarm.org/$arch/$repo\n\
+Server = http://de3.mirror.archlinuxarm.org/$arch/$repo\n\
+Server = http://eu.mirror.archlinuxarm.org/$arch/$repo\n\
+Server = http://fl.us.mirror.archlinuxarm.org/$arch/$repo\n' \
+    > /etc/pacman.d/mirrorlist
 
 RUN pacman-key --init && pacman-key --populate archlinuxarm
 
 RUN pacman -Syu --noconfirm
 
-# Install now the linux-rpi (Kernel for RPi)
-RUN pacman -Sy ${KERNEL} openssh --noconfirm
+# Hack, since we used Alpine to bootstrap, /etc/locale.gen is not complete,
+# remove it and reinstalling glibc will fix this issue
+RUN rm /etc/locale.gen
+
+RUN pacman -Sy glibc linux-aarch64 nano openssh --noconfirm
 
 # Prepare network to be started with systemd-networkd with dhcp
 RUN mkdir -p /etc/systemd/network && \
@@ -39,14 +45,17 @@ RUN mkdir -p /etc/ssh/sshd_config.d && \
       'ClientAliveCountMax 2' \
       > /etc/ssh/sshd_config.d/10-root-password.conf
 
-# Set root password interactively or fixed
-# (replace "changeme" with your actual password)
 RUN echo "root:alarm" | chpasswd
 
 RUN ln -sf /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
 
 # Cleanup pacman-key init
 RUN rm -rf /etc/pacman.d/gnupg*
+
+####################################
+# Only needed to retrieve a rootfs #
+####################################
+FROM builder AS rootfs-builder
 
 # Create rootfs
 RUN tar -cpf /rootfs.tar \
@@ -63,4 +72,4 @@ RUN tar -cpf /rootfs.tar \
 # EXPORT-ONLY: tarball artifact stage
 ###############################################
 FROM scratch AS export
-COPY --from=builder /rootfs.tar /archlinuxarm-rpi-aarch64-rootfs.tar
+COPY --from=rootfs-builder /rootfs.tar /archlinuxarm-aarch64-rootfs.tar
