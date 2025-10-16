@@ -1,8 +1,8 @@
 PLATFORMS?=linux/arm64
 IMAGE?=archlinuxarm
 
-.PHONY: qemu
-qemu:
+.PHONY: binfmt
+binfmt:
 	docker run --privileged --rm tonistiigi/binfmt --install arm64
 
 # --- Builds ---
@@ -16,51 +16,55 @@ build-minimal:
           --load \
 	  .
 
-.PHONY: build-rpi-aarch64
-build-rpi-aarch64:
-	$(MAKE) build-aarch64 kind=rpi-aarch64 kernel=linux-rpi
-
-.PHONY: build-generic-aarch64
-build-generic-aarch64:
-	$(MAKE) build-aarch64 kind=generic-aarch64 kernel=linux-aarch64
-
 .PHONY: build-aarch64
-build-aarch64:
+build-aarch64: binfmt
 	docker buildx build \
-          --build-arg KERNEL=$(kernel) \
 	  --platform $(PLATFORMS) \
-	  -t $(IMAGE):$(kind) \
+	  -t $(IMAGE):generic-aarch64 \
           -f dockerfiles/Dockerfile.aarch64 \
+	  --target builder \
           --load \
 	  .
 
-.PHONY: export
-export:
+.PHONY: build-aarch64-rootfs
+build-aarch64-rootfs: binfmt
 	docker buildx build \
-          --platform $(PLATFORMS) \
-          -t $(IMAGE):minimal-aarch64-export \
-          -f dockerfiles/Dockerfile.base \
-	  --target export \
-          --load .
-
-.PHONY: export-rpi
-export-rpi:
-	docker buildx build \
-          --platform $(PLATFORMS) \
-          -t $(IMAGE):rpi-aarch64-export \
+	  --platform $(PLATFORMS) \
+	  -t $(IMAGE):generic-aarch64-rootfs \
           -f dockerfiles/Dockerfile.aarch64 \
 	  --target export \
-          --load .
+          --load \
+	  .
+
+.PHONY: build-astroarch
+build-astroarch: binfmt
+	docker buildx build \
+	  --platform $(PLATFORMS) \
+	  -t astroarch:latest \
+          -f dockerfiles/Dockerfile.astroarch \
+	  --target builder \
+          --load \
+	  .
+
+.PHONY: build-astroarch-rootfs
+build-astroarch-rootfs: binfmt
+	docker buildx build \
+	  --platform $(PLATFORMS) \
+	  -t astroarch-rootfs:latest \
+          -f dockerfiles/Dockerfile.astroarch \
+	  --target astroarch-rootfs \
+          --load \
+	  .
 
 .PHONY: create-rootfs-container
 create-rootfs-container:
-	docker create --platform=linux/arm64 --name take $(IMAGE):generic-aarch64 sh
+	docker create --platform=$(PLATFORMS) --name take astroarch-rootfs:latest sh
 
 .PHONY: copy-rootfs-tar
 copy-rootfs-tar:
-	docker cp take:/archlinuxarm-rpi-aarch64-rootfs.tar ./rootfs.tar
+	docker cp take:/astroarch-rootfs.tar ./rootfs.tar
 	docker rm -f take
 
 .PHONY: prepare-rpi-img
-prepare-rpi-image: create-rootfs-container copy-rootfs-tar
+prepare-rpi-image: build-astroarch-rootfs create-rootfs-container copy-rootfs-tar
 	./scripts/build_img.sh
