@@ -21,6 +21,7 @@ env:
   MINIMAL_DOCKERFILE: dockerfiles/Dockerfile.base
   ALARM_DOCKERFILE: dockerfiles/Dockerfile.aarch64
   TARGET: archarm
+  ALARM_TARGET: builder
 
 jobs:
   build:
@@ -104,6 +105,7 @@ jobs:
         with:
           context: .
           file: ${{ env.ALARM_DOCKERFILE }}
+          target: ${{ env.ALARM_TARGET }}
           platforms: ${{ env.PLATFORMS }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-alarm.outputs.tags }}      # mirrors: -t $(IMAGE):minimal-aarch64 (+ semver / sha variants)
