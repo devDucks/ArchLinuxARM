@@ -66,5 +66,5 @@ copy-rootfs-tar:
 	docker rm -f take
 
 .PHONY: prepare-rpi-img
-prepare-rpi-image: build-astroarch-rootfs create-rootfs-container copy-rootfs-tar
+prepare-rpi-img: build-astroarch-rootfs create-rootfs-container copy-rootfs-tar
 	./scripts/build_img.sh
