@@ -15,6 +15,7 @@ RUN pacman -Syu --noconfirm
 
 RUN pacman -Sy \
     arandr \
+    astroarch-bridge \
     astroarch-onboarding \
     astroarch-status-notifications \
     astrometry.net \
@@ -29,6 +30,7 @@ RUN pacman -Sy \
     discover \
     dnsmasq \
     dolphin \
+    fakeroot \
     firefox \
     flatpak \
     fortune-mod \
@@ -77,6 +79,7 @@ RUN pacman -Sy \
     qt6-serialport \
     qt6-websockets \
     qtkeychain \
+    rsync \
     samba \
     sddm \
     sddm-kcm \
