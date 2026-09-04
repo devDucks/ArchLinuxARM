@@ -51,6 +51,10 @@ sudo mount "$BOOT_DEV" /mnt/arch-boot
 # --- extract rootfs (preserve xattrs/owners) ---
 sudo tar --numeric-owner -xpf "$ROOTFS_TAR" -C /mnt/arch-root
 
+# --- hostname & hosts (cannot be set during Docker build) ---
+echo "astroarch" | sudo tee /mnt/arch-root/etc/hostname >/dev/null
+printf '127.0.0.1\tlocalhost\n127.0.1.1\tastroarch\n' | sudo tee -a /mnt/arch-root/etc/hosts >/dev/null
+
 # --- move/copy boot files to the FAT32 partition ---
 # Official instructions literally "move root/boot/* to boot" when using their tarball.
 # We do the equivalent from our extracted rootfs.
@@ -61,11 +65,18 @@ fi
 # --- minimal boot config depending on strategy ---
 # If you installed linux-rpi (+ raspberrypi-bootloader), firmware boots kernel*.img via config.txt/cmdline.txt
 if [ -f /mnt/arch-boot/kernel8.img ]; then
-  printf 'arm_64bit=1\nenable_uart=1\n' | sudo tee /mnt/arch-boot/config.txt >/dev/null
-  # root= by PARTUUID (safest). Discover it:
-  sudo tee /mnt/arch-boot/cmdline.txt >/dev/null <<EOF
-console=serial0,115200 console=ttyAMA0,115200 root=PARTUUID=${PARTUUID} rw rootwait
-EOF
+  # Only write a fallback config.txt if the rootfs didn't already provide one (e.g. from astroarch_build.sh)
+  if [ ! -f /mnt/arch-boot/config.txt ]; then
+    printf 'arm_64bit=1\nenable_uart=1\n' | sudo tee /mnt/arch-boot/config.txt >/dev/null
+  fi
+  # Fix root= in cmdline.txt: the rootfs copy has the Docker build's /dev/vda2 UUID, not the real PARTUUID.
+  # If a cmdline.txt already exists (e.g. from astroarch_build.sh), patch only root=; otherwise write a minimal one.
+  if [ -f /mnt/arch-boot/cmdline.txt ]; then
+    sudo sed -i "s|root=[^ ]*|root=PARTUUID=${PARTUUID}|" /mnt/arch-boot/cmdline.txt
+  else
+    echo "console=serial0,115200 console=ttyAMA0,115200 root=PARTUUID=${PARTUUID} rw rootwait" \
+      | sudo tee /mnt/arch-boot/cmdline.txt >/dev/null
+  fi
 fi
 
 # If you installed linux-aarch64 + uboot-raspberrypi, ensure extlinux.conf exists

@@ -13,6 +13,8 @@ RUN pacman-key --init && pacman-key --populate archlinuxarm
 
 RUN pacman -Syu --noconfirm
 
+RUN mkdir -p /run/dbus && dbus-daemon --system --fork
+
 RUN pacman -Sy \
     arandr \
     astroarch-bridge \
@@ -63,7 +65,6 @@ RUN pacman -Sy \
     networkmanager-qt \
     novnc \
     openssh \
-    openssl-1.1 \
     packagekit-qt6 \
     pacman-contrib \
     paru \
@@ -78,7 +79,6 @@ RUN pacman -Sy \
     qt6-serialbus \
     qt6-serialport \
     qt6-websockets \
-    qtkeychain \
     rsync \
     samba \
     sddm \
@@ -95,11 +95,24 @@ RUN pacman -Sy \
     xorg \
     xorg-fonts-misc \
     xplanet \
+    xrdp \
+    xorgxrdp \
     zsh \
     --noconfirm
 
-# Cleanup pacman-key init
-RUN rm -rf /etc/pacman.d/gnupg*
+RUN curl -O  https://raw.githubusercontent.com/devDucks/astroarch/refs/heads/main/astroarch_build.sh && \
+    sed -i '/\/etc\/hosts/d; /\/etc\/hostname/d;' astroarch_build.sh
+
+RUN bash astroarch_build.sh
+
+RUN mkdir -p /home/astronaut/.local/share/kstars/astrometry
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4100/index-41{07..19}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4200/index-4205-{00..11}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4200/index-4206-{00..11}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4200/index-4207-{00..11}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://data.astrometry.net/4200/index-42{08..19}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-{00..47}.fits
+RUN wget -P /home/astronaut/.local/share/kstars/astrometry https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5206-{00..47}.fits
 
 ####################################
 # Only needed to retrieve a rootfs #

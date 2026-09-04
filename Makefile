@@ -49,6 +49,7 @@ build-astroarch: binfmt
 .PHONY: build-astroarch-rootfs
 build-astroarch-rootfs: binfmt
 	docker buildx build \
+	  --build-arg BUILDKIT_SANDBOX_SIZE=30G \
 	  --platform $(PLATFORMS) \
 	  -t astroarch-rootfs:latest \
           -f dockerfiles/Dockerfile.astroarch \
