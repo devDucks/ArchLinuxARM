@@ -2,7 +2,7 @@
 
 Reproducible ArchLinuxARM builds for ARM boards and emulators, driven entirely by Docker Buildx.
 
-[![Build & Push](https://img.shields.io/github/actions/workflow/status/MattBlack85/ArchLinuxARM-docker/buildx.yml?branch=main&label=build)](https://github.com/MattBlack85/ArchLinuxARM-docker/actions)
+[![Build & Push](https://img.shields.io/github/actions/workflow/status/devDucks/ArchLinuxARM/buildx.yml?branch=main&label=build)](https://github.com/devDucks/ArchLinuxARM/actions)
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue)](./LICENSE)
 
 ## Overview
