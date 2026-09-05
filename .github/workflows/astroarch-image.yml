@@ -1,0 +1,395 @@
+name: Build AstroArch RPi image
+
+# Builds the whole AstroArch chain from scratch on a GitHub-hosted runner and
+# produces a bootable Raspberry Pi .img, mirroring `make prepare-rpi-img`:
+#
+#   Dockerfile.base      -> ghcr.io/devducks/archlinuxarm-basic:latest  (minimal ALARM rootfs)
+#   Dockerfile.aarch64   -> ghcr.io/devducks/archlinuxarm:latest        (kernel, ssh, network)
+#   Dockerfile.astroarch -> rootfs.tar                                  (KDE + INDI stack)
+#   scripts/build_img.sh -> archarm-rpi-aarch64.img                     (partitioned disk image)
+#
+# The default runner is `ubuntu-24.04-arm`, which is aarch64 natively: no QEMU
+# user-mode emulation is involved and the build runs at native speed. On an
+# x86_64 runner the workflow registers the arm64 binfmt handler instead
+# (same as `make binfmt`) and everything still works, just much slower.
+#
+# Nothing is pushed anywhere by default: the image is only uploaded as a
+# workflow artifact. Publishing to a GitHub Release is opt-in.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner to build on"
+        type: choice
+        default: ubuntu-24.04-arm
+        options:
+          - ubuntu-24.04-arm
+          - ubuntu-latest
+      from_scratch:
+        description: "Rebuild base + aarch64 images from scratch (off = pull them from GHCR)"
+        type: boolean
+        default: true
+      image_size:
+        description: "Total .img size (sparse), e.g. 20G"
+        type: string
+        default: "20G"
+      boot_mb:
+        description: "FAT32 /boot partition size in MiB"
+        type: string
+        default: "768"
+      publish_release:
+        description: "Publish the image to a GitHub Release (requires a tag)"
+        type: boolean
+        default: false
+  # Nightly/weekly builds are intentionally NOT enabled: a full run downloads
+  # several GB and takes a long time. Uncomment if you want a scheduled build.
+  # schedule:
+  #   - cron: '0 3 1 * *'   # 03:00 on the 1st of every month
+
+permissions:
+  contents: read
+
+concurrency:
+  group: astroarch-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build AstroArch image
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 350
+
+    env:
+      IMG_NAME: archarm-rpi-aarch64.img
+      SIZE: ${{ inputs.image_size || '20G' }}
+      BOOT_MB: ${{ inputs.boot_mb || '768' }}
+      BASIC_IMAGE: ghcr.io/devducks/archlinuxarm-basic:latest
+      ALARM_IMAGE: ghcr.io/devducks/archlinuxarm:latest
+      # Largest single part uploaded as an artifact / release asset (bytes).
+      # GitHub release assets top out around 2 GB, so stay below that.
+      SPLIT_BYTES: "1900000000"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1. Make room. A full AstroArch rootfs is ~10 GB and the .img on top
+      #    of it another ~11 GB, so we need every gigabyte the runner has.
+      # ------------------------------------------------------------------
+      - name: Report runner resources
+        run: |
+          set -x
+          uname -a
+          nproc
+          free -h || true
+          df -h
+          lsblk || true
+          docker version || true
+
+      - name: Reclaim disk space
+        run: |
+          set -euo pipefail
+          before=$(df --output=avail -k / | tail -1)
+          # These are only present on the x86_64 images; guarded so the step is
+          # a no-op on the arm64 runner, where they do not exist.
+          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                   /usr/local/share/boost /usr/local/share/powershell \
+                   /usr/share/swift "${AGENT_TOOLSDIRECTORY:-}"; do
+            [ -n "$d" ] && [ -e "$d" ] && sudo rm -rf "$d" || true
+          done
+          sudo apt-get clean || true
+          after=$(df --output=avail -k / | tail -1)
+          echo "Reclaimed $(( (after - before) / 1024 )) MiB on /"
+          df -h /
+
+      - name: Pick the working filesystem and relocate Docker if useful
+        id: work
+        run: |
+          set -euo pipefail
+          root_avail=$(df --output=avail -k / | tail -1)
+          mnt_avail=0
+          if mountpoint -q /mnt; then
+            mnt_avail=$(df --output=avail -k /mnt | tail -1)
+          fi
+          echo "free on /   : $((root_avail / 1024)) MiB"
+          echo "free on /mnt: $((mnt_avail / 1024)) MiB"
+
+          # The ephemeral /mnt disk is not present on every runner SKU, so both
+          # branches have to work. When it exists and is roomier than /, move
+          # Docker's storage there. Docker 29 defaults to the containerd image
+          # store, where `data-root` alone does NOT move image layers, so
+          # /var/lib/containerd has to be relocated as well.
+          if [ "$mnt_avail" -gt "$root_avail" ] && [ "$mnt_avail" -gt 20971520 ]; then
+            echo "Relocating Docker storage to /mnt"
+            sudo systemctl stop docker.socket docker containerd || true
+            sudo mkdir -p /mnt/docker-data /mnt/containerd
+            sudo rm -rf /var/lib/docker /var/lib/containerd
+            sudo ln -s /mnt/containerd /var/lib/containerd
+            echo '{"data-root": "/mnt/docker-data"}' | sudo tee /etc/docker/daemon.json
+            sudo systemctl daemon-reload
+            sudo systemctl start containerd docker || true
+            if ! timeout 60 docker info >/dev/null 2>&1; then
+              echo "::warning::Docker did not come back after relocation, reverting"
+              sudo rm -f /etc/docker/daemon.json
+              sudo rm -f /var/lib/containerd
+              sudo mkdir -p /var/lib/containerd
+              sudo systemctl restart containerd docker
+            fi
+            docker info | grep -i "docker root dir" || true
+            echo "dir=/mnt/work" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=${GITHUB_WORKSPACE}/work" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare working directory and host tools
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "${{ steps.work.outputs.dir }}"
+          sudo chown "$(id -u):$(id -g)" "${{ steps.work.outputs.dir }}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            dosfstools e2fsprogs util-linux fdisk parted kpartx zstd rsync
+          df -h
+
+      # ------------------------------------------------------------------
+      # 2. Emulation. Only needed when the runner is not already aarch64;
+      #    this is the CI equivalent of `make binfmt`.
+      # ------------------------------------------------------------------
+      - name: Register arm64 binfmt handler (x86_64 runners only)
+        if: ${{ runner.arch != 'ARM64' }}
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # ------------------------------------------------------------------
+      # 3. The build chain. Each image is tagged with exactly the reference
+      #    the next Dockerfile has in its FROM line, so BuildKit resolves it
+      #    from the local image store instead of pulling from GHCR. That is
+      #    what makes the "from scratch" chain work in a single job without
+      #    pushing anything to a registry in between.
+      # ------------------------------------------------------------------
+      - name: Build minimal ArchLinuxARM rootfs (Dockerfile.base)
+        if: ${{ inputs.from_scratch != false }}
+        run: |
+          set -euo pipefail
+          # Retried because pacman aborts the whole transaction on a single slow
+          # mirror response ("Operation too slow"), which is a transient failure
+          # that a rerun clears; BuildKit resumes from the last good layer.
+          retry() { local n=0; until [ "$n" -ge 3 ]; do "$@" && return 0; n=$((n+1)); echo "::warning::attempt $n failed, retrying in 30s"; sleep 30; done; return 1; }
+          retry docker build \
+            --platform linux/arm64 \
+            -f dockerfiles/Dockerfile.base \
+            --target archarm \
+            -t "$BASIC_IMAGE" \
+            .
+          docker images "$BASIC_IMAGE"
+          df -h /
+
+      - name: Pull published base images instead
+        if: ${{ inputs.from_scratch == false }}
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/arm64 "$BASIC_IMAGE"
+
+      - name: Build ArchLinuxARM aarch64 image (Dockerfile.aarch64)
+        if: ${{ inputs.from_scratch != false }}
+        run: |
+          set -euo pipefail
+          retry() { local n=0; until [ "$n" -ge 3 ]; do "$@" && return 0; n=$((n+1)); echo "::warning::attempt $n failed, retrying in 30s"; sleep 30; done; return 1; }
+          retry docker build \
+            --platform linux/arm64 \
+            -f dockerfiles/Dockerfile.aarch64 \
+            --target builder \
+            -t "$ALARM_IMAGE" \
+            .
+          docker images "$ALARM_IMAGE"
+          df -h /
+
+      - name: Pull published aarch64 image instead
+        if: ${{ inputs.from_scratch == false }}
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/arm64 "$ALARM_IMAGE"
+
+      - name: Build AstroArch rootfs (Dockerfile.astroarch)
+        run: |
+          set -euo pipefail
+          retry() { local n=0; until [ "$n" -ge 2 ]; do "$@" && return 0; n=$((n+1)); echo "::warning::attempt $n failed, retrying in 60s"; sleep 60; done; return 1; }
+          # The `astroarch-rootfs` stage is `FROM scratch` and contains nothing
+          # but the tarball, so exporting it with `--output type=local` writes
+          # rootfs.tar straight to disk. This replaces the Makefile's
+          # create-rootfs-container + copy-rootfs-tar dance and avoids keeping
+          # a throwaway container around.
+          retry docker build \
+            --platform linux/arm64 \
+            -f dockerfiles/Dockerfile.astroarch \
+            --target astroarch-rootfs \
+            --output "type=local,dest=${{ steps.work.outputs.dir }}/export" \
+            .
+          mv "${{ steps.work.outputs.dir }}/export/astroarch-rootfs.tar" \
+             "${{ steps.work.outputs.dir }}/rootfs.tar"
+          rmdir "${{ steps.work.outputs.dir }}/export" || true
+          ls -lh "${{ steps.work.outputs.dir }}/rootfs.tar"
+          df -h
+
+      - name: Free the Docker image store
+        run: |
+          set -euo pipefail
+          # rootfs.tar is on disk now; the images and the build cache hold a
+          # second and third copy of the same ~10 GB and are no longer needed.
+          docker system prune -af || true
+          docker builder prune -af || true
+          df -h
+
+      # ------------------------------------------------------------------
+      # 4. Turn the rootfs into a partitioned, bootable disk image.
+      # ------------------------------------------------------------------
+      - name: Build the Raspberry Pi disk image
+        working-directory: ${{ steps.work.outputs.dir }}
+        run: |
+          set -euo pipefail
+          env IMG="$IMG_NAME" \
+              SIZE="$SIZE" \
+              BOOT_MB="$BOOT_MB" \
+              ROOTFS_TAR=rootfs.tar \
+              bash "$GITHUB_WORKSPACE/scripts/build_img.sh"
+          ls -lh "$IMG_NAME"
+          echo "apparent size: $(du -h --apparent-size "$IMG_NAME" | cut -f1)"
+          echo "on-disk size : $(du -h "$IMG_NAME" | cut -f1)"
+          df -h
+
+      - name: Drop the rootfs tarball
+        working-directory: ${{ steps.work.outputs.dir }}
+        run: |
+          rm -f rootfs.tar
+          df -h
+
+      # ------------------------------------------------------------------
+      # 5. Verify the image before spending time compressing it. These are
+      #    the checks that used to be done by hand after booting under QEMU.
+      # ------------------------------------------------------------------
+      - name: Verify the built image
+        working-directory: ${{ steps.work.outputs.dir }}
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/scripts/verify_img.sh" "$IMG_NAME" | tee verify.txt
+
+      # ------------------------------------------------------------------
+      # 6. Compress and publish as an artifact.
+      # ------------------------------------------------------------------
+      - name: Compress the image
+        id: compress
+        working-directory: ${{ steps.work.outputs.dir }}
+        run: |
+          set -euo pipefail
+          # astroarch.version is written by scripts/verify_img.sh, read out of
+          # the image itself (/home/astronaut/.astroarch.version).
+          version=$(cat astroarch.version 2>/dev/null || echo "dev")
+          stamp=$(date -u +%Y%m%d)
+          out="astroarch-${version}-${stamp}-aarch64.img.zst"
+          # zstd rather than xz: comparable ratio on a mostly-empty sparse image,
+          # but minutes instead of hours, which matters against the 6h job limit.
+          # No --long: it would push the decompression window past what
+          # rpi-imager and other flashing tools accept by default.
+          zstd -T0 -12 -o "$out" "$IMG_NAME"
+          rm -f "$IMG_NAME"
+          sha256sum "$out" > "$out.sha256"
+          ls -lh "$out"
+          echo "name=$out" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c %s "$out")" >> "$GITHUB_OUTPUT"
+          df -h
+
+      - name: Split the image if it exceeds the per-asset limit
+        id: split
+        working-directory: ${{ steps.work.outputs.dir }}
+        run: |
+          set -euo pipefail
+          out="${{ steps.compress.outputs.name }}"
+          size="${{ steps.compress.outputs.size }}"
+          if [ "$size" -gt "$SPLIT_BYTES" ]; then
+            split -b "$SPLIT_BYTES" -d --additional-suffix=.part "$out" "$out."
+            rm -f "$out"
+            {
+              echo "The image was split because it exceeds the GitHub asset size limit."
+              echo "Reassemble it with:"
+              echo
+              echo "  cat ${out}.*.part > ${out}"
+              echo "  sha256sum -c ${out}.sha256"
+              echo "  zstd -d ${out}"
+            } > REASSEMBLE.txt
+            echo "split=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "split=false" >> "$GITHUB_OUTPUT"
+          fi
+          ls -lh
+
+      - name: Upload the image
+        uses: actions/upload-artifact@v4
+        with:
+          name: astroarch-image
+          path: |
+            ${{ steps.work.outputs.dir }}/*.img.zst
+            ${{ steps.work.outputs.dir }}/*.part
+            ${{ steps.work.outputs.dir }}/*.sha256
+            ${{ steps.work.outputs.dir }}/REASSEMBLE.txt
+            ${{ steps.work.outputs.dir }}/verify.txt
+          if-no-files-found: error
+          retention-days: 14
+          # The payload is already zstd-compressed; re-zipping it only burns CPU.
+          compression-level: 0
+
+      - name: Job summary
+        if: always()
+        run: |
+          cd "${{ steps.work.outputs.dir }}" 2>/dev/null || true
+          {
+            echo "## AstroArch image build"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Runner | \`${{ runner.os }}/${{ runner.arch }}\` (\`${{ inputs.runner || 'ubuntu-24.04-arm' }}\`) |"
+            echo "| From scratch | ${{ inputs.from_scratch != false }} |"
+            echo "| Image size | ${SIZE} (boot ${BOOT_MB} MiB) |"
+            echo "| Artifact | \`${{ steps.compress.outputs.name }}\` |"
+            echo "| Split | ${{ steps.split.outputs.split }} |"
+            echo
+            if [ -f verify.txt ]; then
+              echo "### Verification"
+              echo '```'
+              cat verify.txt
+              echo '```'
+            fi
+            echo "### Disk"
+            echo '```'
+            df -h
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish release
+    needs: build
+    if: ${{ inputs.publish_release == true && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the image
+        uses: actions/download-artifact@v4
+        with:
+          name: astroarch-image
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # Created as a draft on purpose: someone has to look at the image
+          # before it goes out to users.
+          gh release create "$tag" dist/* \
+            --draft \
+            --generate-notes \
+            --title "AstroArch $tag"
