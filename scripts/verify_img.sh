@@ -25,12 +25,31 @@ pass() { printf '  ok    %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; failures=$((failures + 1)); }
 warn() { printf '  warn  %s\n' "$1"; warnings=$((warnings + 1)); }
 
+# Resolve a path the way the booted system would. Much of what AstroArch
+# installs is a symlink into /home/astronaut/.astroarch, and those targets are
+# absolute: following them from the host would resolve against the host root
+# and report everything as missing.
+resolve_in_root() {
+  local p="$1" target i=0
+  while [ "$i" -lt 40 ] && sudo test -L "$ROOT_MNT$p"; do
+    target=$(sudo readlink "$ROOT_MNT$p")
+    case "$target" in
+      /*) p="$target" ;;
+      *)  p="$(dirname "$p")/$target" ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s' "$p"
+}
+
+exists_in_root() { sudo test -e "$ROOT_MNT$(resolve_in_root "$1")"; }
+
 check() { # check <description> <path relative to root>
-  if sudo test -e "$ROOT_MNT/$2"; then pass "$1"; else fail "$1 (missing $2)"; fi
+  if exists_in_root "/$2"; then pass "$1"; else fail "$1 (missing $2)"; fi
 }
 
 check_warn() {
-  if sudo test -e "$ROOT_MNT/$2"; then pass "$1"; else warn "$1 (missing $2)"; fi
+  if exists_in_root "/$2"; then pass "$1"; else warn "$1 (missing $2)"; fi
 }
 
 cleanup() {
@@ -117,8 +136,8 @@ fi
 echo "  fstab:"; sudo sed 's/^/    /' "$ROOT_MNT/etc/fstab"
 
 version=""
-if sudo test -e "$ROOT_MNT/home/astronaut/.astroarch.version"; then
-  version=$(sudo cat "$ROOT_MNT/home/astronaut/.astroarch.version" 2>/dev/null | tr -d '[:space:]')
+if exists_in_root /home/astronaut/.astroarch.version; then
+  version=$(sudo cat "$ROOT_MNT$(resolve_in_root /home/astronaut/.astroarch.version)" 2>/dev/null | tr -d '[:space:]')
   pass "AstroArch version ${version:-unknown}"
   printf '%s' "${version:-dev}" > astroarch.version
 else
@@ -128,7 +147,8 @@ fi
 
 echo
 echo "== boot target =="
-default_target=$(sudo readlink "$ROOT_MNT/etc/systemd/system/default.target" 2>/dev/null || echo "")
+default_target=$(sudo readlink "$ROOT_MNT/etc/systemd/system/default.target" 2>/dev/null || \
+                 sudo readlink "$ROOT_MNT/usr/lib/systemd/system/default.target" 2>/dev/null || echo "")
 if [ -z "$default_target" ]; then
   # No override means systemd falls back to its compiled-in default, which is
   # graphical.target on Arch. Worth flagging rather than failing.
@@ -150,27 +170,20 @@ for unit in graphical.target.wants/sddm.service \
             multi-user.target.wants/chronyd.service \
             multi-user.target.wants/novnc.service \
             multi-user.target.wants/resize_once.service; do
-  link="$ROOT_MNT/etc/systemd/system/$unit"
-  if sudo test -L "$link"; then
-    target=$(sudo readlink "$link")
-    # These symlinks point at absolute paths inside the image, so they have to
-    # be resolved against the mount point and not against the host root.
-    case "$target" in
-      /*) resolved="$ROOT_MNT$target" ;;
-      *)  resolved="$(dirname "$link")/$target" ;;
-    esac
-    if sudo test -e "$resolved"; then
+  link="/etc/systemd/system/$unit"
+  if sudo test -L "$ROOT_MNT$link"; then
+    if exists_in_root "$link"; then
       pass "$unit"
     else
       # An enabled unit whose target file does not exist means the package
       # providing it was never installed; systemd will log a failure at boot.
-      warn "$unit is enabled but dangling -> $target"
+      warn "$unit is enabled but dangling -> $(sudo readlink "$ROOT_MNT$link")"
     fi
   else
     warn "$unit is not enabled"
   fi
 done
-if sudo test -e "$ROOT_MNT/etc/systemd/system/multi-user.target.wants/sshd.service"; then
+if exists_in_root /etc/systemd/system/multi-user.target.wants/sshd.service; then
   pass "sshd.service"
 else
   warn "sshd.service is not enabled"
