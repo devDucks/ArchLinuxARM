@@ -15,7 +15,15 @@ RUN pacman -Syu --noconfirm
 
 RUN mkdir -p /run/dbus && dbus-daemon --system --fork
 
+# libgphoto2 is pinned to the official package on purpose. The copy in the
+# [astromatto] repo is from May 2024 and still depends on the bare `libjpeg`
+# virtual, which libjpeg-turbo stopped providing; because [astromatto] is
+# ordered above [extra], pacman picks that stale copy and the whole
+# transaction fails to resolve, taking libindi, indi-3rdparty-* and kstars
+# with it. Dropping libgphoto2 from [astromatto] would make this line
+# unnecessary.
 RUN pacman -Sy \
+    extra/libgphoto2 \
     arandr \
     astroarch-bridge \
     astroarch-onboarding \
