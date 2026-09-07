@@ -59,8 +59,17 @@ check_warn() {
 # to model the loader's search order to catch a library that is nowhere at all.
 SONAME_INDEX=${SONAME_INDEX:-$(mktemp)}
 build_soname_index() {
-  sudo find "$ROOT_MNT/usr/lib" "$ROOT_MNT/usr/lib64" "$ROOT_MNT/lib" \
-    -name '*.so*' -printf '%f\n' 2>/dev/null | sort -u > "$SONAME_INDEX"
+  local d
+  : > "$SONAME_INDEX"
+  # One directory at a time, and never fatal: ArchLinuxARM has no /usr/lib64,
+  # and find exits non-zero for a missing starting point even with its stderr
+  # discarded, which under `set -e -o pipefail` would kill the whole script.
+  for d in /usr/lib /usr/lib64 /lib; do
+    sudo test -d "$ROOT_MNT$d" || continue
+    sudo find "$ROOT_MNT$d" -name '*.so*' -printf '%f\n' 2>/dev/null \
+      >> "$SONAME_INDEX" || true
+  done
+  sort -u -o "$SONAME_INDEX" "$SONAME_INDEX"
 }
 
 # check_links <description> <path relative to root>
@@ -90,7 +99,9 @@ check_links() {
     return
   fi
 
-  needed=$(sudo readelf -d "$file" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort -u)
+  # `|| true` for the same reason as above: a readelf failure has to reach the
+  # warn below, not abort the run.
+  needed=$(sudo readelf -d "$file" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort -u || true)
   if [ -z "$needed" ]; then
     # Either readelf is missing from the runner or the file is statically
     # linked. Both are worth a look, and neither is something to pass silently.
