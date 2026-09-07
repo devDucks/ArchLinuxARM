@@ -1,3 +1,88 @@
+###############################################
+# PHD2, built from source with OpenCV unlinked
+###############################################
+# The [astromatto] phd2 package is linked against opencv 4.13. Arch has since
+# replaced opencv 4 with opencv 5, so the 57 libopencv_*.so.413 that binary
+# asks for exist in no aarch64 repo any more and it dies on startup. The
+# package does not declare an `opencv` dependency either, so pacman resolves
+# it cleanly and the breakage only surfaces the first time a user launches
+# PHD2.
+#
+# PHD2 does not actually need OpenCV: it pulls in exactly four symbols
+# (cv::VideoCapture, cv::Mat's ctor/dtor, cv::cvtColor), all from
+# src/cam_opencv.cpp, which is entirely inside `#ifdef OPENCV_CAMERA` - the
+# webcam driver, redundant on AstroArch next to the INDI V4L2 driver and the
+# vendor SDKs. Deleting that one define and the unconditional
+# find_package(OpenCV) drops the OpenCV link completely, so the binary stops
+# tracking opencv sonames for good.
+#
+# Built in its own stage so the toolchain never reaches the rootfs; only the
+# install tree is copied over. The trade-off is that these files are not owned
+# by any pacman package, so `pacman -Syu` on the device will not update them.
+FROM ghcr.io/devducks/archlinuxarm:latest AS phd2-builder
+
+ARG PHD2_VERSION=2.6.14
+
+# Dockerfile.aarch64 removes /etc/pacman.d/gnupg at the end of its build, so
+# the keyring has to be set up again before anything can be installed here.
+RUN pacman-key --init && pacman-key --populate archlinuxarm
+
+# The same [astromatto] repo the runtime stage uses. PHD2 has to be compiled
+# against the exact cfitsio and libindi the image will ship, not against the
+# newer copies in [extra]: linking to a library the target system does not
+# have is the whole bug this stage exists to fix.
+RUN sed -i 's|\[core\]|\[astromatto\]\nSigLevel = Optional TrustAll\nServer = http://astroarch.astromatto.com:9000/$arch\n\n\[core\]|' /etc/pacman.conf
+
+# Same reason as in the runtime stage: pacman aborts a whole transaction when a
+# single mirror stalls, which on these long downloads happens often enough to
+# matter.
+RUN sed -i 's|ParallelDownloads = 5|ParallelDownloads = 5\nDisableDownloadTimeout|g' /etc/pacman.conf
+
+# extra/libgphoto2 is pinned for the same reason as in the runtime stage
+# below: [astromatto]'s copy still depends on the bare `libjpeg` virtual that
+# libjpeg-turbo no longer provides, and it drags libindi down with it.
+RUN pacman -Syu --noconfirm && \
+    pacman -S --needed --noconfirm \
+      extra/libgphoto2 \
+      cfitsio cmake curl eigen gcc gettext git gtest libindi libnova libusb \
+      libx11 make pkgconf wxwidgets-gtk3 zlib
+
+ADD https://github.com/OpenPHDGuiding/phd2/archive/refs/tags/v${PHD2_VERSION}.tar.gz /tmp/phd2.tar.gz
+RUN mkdir -p /tmp/phd2 && tar -xzf /tmp/phd2.tar.gz -C /tmp/phd2 --strip-components=1
+
+# The patch is asserted before it is applied: if upstream moves these lines the
+# build has to stop here, rather than quietly producing another opencv-linked
+# binary that only fails on the user's Pi. cameras.h defines OPENCV_CAMERA
+# twice, once per platform; only the __linux__ branch is touched.
+RUN cd /tmp/phd2 && \
+    grep -q '^# elif defined(__linux__)' src/cameras.h && \
+    grep -q '^  find_package( OpenCV REQUIRED )$' CMakeLists.txt && \
+    grep -q '^  target_link_libraries(phd2 X11 ${OpenCV_LIBS})$' CMakeLists.txt && \
+    sed -i '/^# elif defined(__linux__)/,$ { /^#  define OPENCV_CAMERA$/d }' src/cameras.h && \
+    sed -i 's/^  find_package( OpenCV REQUIRED )$//; s/^  target_link_libraries(phd2 X11 ${OpenCV_LIBS})$/  target_link_libraries(phd2 X11)/' CMakeLists.txt && \
+    ! grep -q 'OpenCV' CMakeLists.txt
+
+# USE_SYSTEM_* keeps cmake from downloading and building its own copies of
+# libraries the image already has. CMAKE_POLICY_VERSION_MINIMUM is needed
+# because PHD2 still declares an older cmake_minimum_required than current
+# cmake accepts by default.
+RUN mkdir -p /tmp/phd2/build && cd /tmp/phd2/build && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DUSE_SYSTEM_LIBINDI=ON \
+          -DUSE_SYSTEM_LIBUSB=ON \
+          -DUSE_SYSTEM_GTEST=ON \
+          -DEIGEN_SRC=/usr/include/eigen3 \
+          .. && \
+    make -j"$(nproc)" && \
+    make install DESTDIR=/phd2-root && \
+    rm -rf /phd2-root/usr/include
+
+# The whole point of this stage, checked rather than assumed.
+RUN readelf -d /phd2-root/usr/bin/phd2.bin | grep -q '(NEEDED)' && \
+    ! readelf -d /phd2-root/usr/bin/phd2.bin | grep -i opencv
+
 FROM ghcr.io/devducks/archlinuxarm:latest AS builder
 
 # Push the astromatto repo so we can pull whatever package into docker immediately
@@ -15,7 +100,15 @@ RUN pacman -Syu --noconfirm
 
 RUN mkdir -p /run/dbus && dbus-daemon --system --fork
 
+# libgphoto2 is pinned to the official package on purpose. The copy in the
+# [astromatto] repo is from May 2024 and still depends on the bare `libjpeg`
+# virtual, which libjpeg-turbo stopped providing; because [astromatto] is
+# ordered above [extra], pacman picks that stale copy and the whole
+# transaction fails to resolve, taking libindi, indi-3rdparty-* and kstars
+# with it. Dropping libgphoto2 from [astromatto] would make this line
+# unnecessary.
 RUN pacman -Sy \
+    extra/libgphoto2 \
     arandr \
     astroarch-bridge \
     astroarch-onboarding \
@@ -59,6 +152,7 @@ RUN pacman -Sy \
     kstars \
     ksystemlog \
     kwalletmanager \
+    libnova \
     neofetch \
     networkmanager \
     network-manager-applet \
@@ -68,7 +162,6 @@ RUN pacman -Sy \
     packagekit-qt6 \
     pacman-contrib \
     paru \
-    phd2 \
     pipewire-jack \
     plasma-desktop \
     plasma-nm \
@@ -90,6 +183,7 @@ RUN pacman -Sy \
     usbutils \
     websockify \
     wireplumber \
+    wxwidgets-gtk3 \
     xf86-video-dummy \
     xf86-video-fbdev \
     xorg \
@@ -99,6 +193,11 @@ RUN pacman -Sy \
     xorgxrdp \
     zsh \
     --noconfirm
+
+# PHD2 from the stage above: /usr/bin/phd2 (wrapper), /usr/bin/phd2.bin and the
+# vendor camera SDKs in /usr/lib/phd2. libnova and wxwidgets-gtk3 are in the
+# list above for it, since no package declares them any more.
+COPY --from=phd2-builder /phd2-root/ /
 
 RUN curl -O  https://raw.githubusercontent.com/devDucks/astroarch/refs/heads/main/astroarch_build.sh && \
     sed -i '/\/etc\/hosts/d; /\/etc\/hostname/d;' astroarch_build.sh

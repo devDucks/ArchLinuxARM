@@ -29,11 +29,19 @@ ${IMG}1 : start=${BOOT_START}, size=${BOOT_SIZE}, type=c
 ${IMG}2 : start=$((BOOT_START+BOOT_SIZE)), type=83
 EOF
 
-# --- map loop with partitions ---
-LOOP=$(sudo losetup --find --show --partscan "$IMG")
-BOOT_DEV=${LOOP}p1
-ROOT_DEV=${LOOP}p2
-PARTUUID=$(sudo blkid -s PARTUUID -o value "$ROOT_DEV")
+# --- map each partition to its own loop device ---
+# One loop device per partition (--offset/--sizelimit) rather than a single
+# --partscan device: /dev/loopNp* nodes depend on udev and are not created
+# reliably inside containers or on GitHub-hosted runners.
+BOOT_DEV=$(sudo losetup --find --show \
+  --offset $(( BOOT_START * 512 )) --sizelimit $(( BOOT_SIZE * 512 )) "$IMG")
+ROOT_DEV=$(sudo losetup --find --show \
+  --offset $(( (BOOT_START + BOOT_SIZE) * 512 )) "$IMG")
+
+# With no whole-disk device there is nothing for blkid to read the PARTUUID
+# from, but on an MBR disk the kernel derives it from the disk identifier:
+# <disk-id>-<2-digit partition number>. Partition 2 is the root filesystem.
+PARTUUID="$(sudo sfdisk --disk-id "$IMG" | tr -d '\n' | sed 's/^0[xX]//' | tr '[:upper:]' '[:lower:]')-02"
 
 # --- mkfs ---
 sudo mkfs.vfat -F 32 -n "$BOOT_LABEL" "$BOOT_DEV"
@@ -109,6 +117,6 @@ sync
 # --- unmount & detach ---
 sudo umount /mnt/arch-boot || true
 sudo umount /mnt/arch-root || true
-sudo losetup -d "$LOOP"
+sudo losetup -d "$BOOT_DEV" "$ROOT_DEV"
 
 echo "OK: ${IMG} is ready."

@@ -142,6 +142,22 @@ Adjust mirrors by editing the relevant Dockerfile.
 
 `.github/workflows/buildx.yml` builds and pushes the minimal and aarch64 images to GHCR (`ghcr.io/<owner>/archlinuxarm-basic` and `ghcr.io/<owner>/archlinuxarm`) on pushes to `main`, on version tags, weekly on a schedule, and on manual dispatch. Pull requests build without pushing.
 
+`.github/workflows/astroarch-image.yml` builds the **whole chain from scratch** in a single job and produces the bootable Raspberry Pi image. It is the CI equivalent of `make prepare-rpi-img`, with no manual QEMU step: `Dockerfile.base` → `Dockerfile.aarch64` → `Dockerfile.astroarch` → `scripts/build_img.sh` → `archarm-rpi-aarch64.img`, verified by `scripts/verify_img.sh` and uploaded as a zstd-compressed workflow artifact.
+
+Run it from the Actions tab (**Build AstroArch RPi image** → *Run workflow*). Inputs:
+
+| Input | Default | Description |
+|---|---|---|
+| `runner` | `ubuntu-24.04-arm` | Build host. The arm64 runner is aarch64 natively, so no QEMU emulation is involved; it is free and unlimited on public repositories. Picking `ubuntu-latest` falls back to binfmt emulation, which works but is several times slower. |
+| `from_scratch` | `true` | Rebuild the base and aarch64 images in the same run. Set to `false` to pull them from GHCR and only rebuild AstroArch, which is much faster when iterating. |
+| `image_size` | `20G` | Total (sparse) size of the `.img`. |
+| `boot_mb` | `768` | Size of the FAT32 `/boot` partition, in MiB. |
+| `publish_release` | `false` | Attach the image to a **draft** GitHub Release. Only takes effect on a tag. |
+
+Nothing is pushed to a registry and no release is published unless you ask for it. Intermediate images are never pushed: each one is tagged locally with exactly the reference the next `FROM` line uses, so BuildKit resolves it from the local image store.
+
+The image is compressed with `zstd` and split into <1.9 GB parts if needed; reassemble with `cat <name>.*.part > <name>` before decompressing.
+
 ## Project layout
 
 ```
@@ -154,7 +170,8 @@ Adjust mirrors by editing the relevant Dockerfile.
 │   └── Dockerfile.astroarch
 ├── scripts/
 │   ├── build_img.sh
-│   └── start_qemu.sh
+│   ├── start_qemu.sh
+│   └── verify_img.sh
 ├── Makefile
 └── README.md
 ```
