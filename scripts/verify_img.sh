@@ -52,9 +52,76 @@ check_warn() {
   if exists_in_root "/$2"; then pass "$1"; else warn "$1 (missing $2)"; fi
 }
 
+# Every soname the image actually ships, indexed once. /usr/lib is searched
+# recursively on purpose: some packages keep private libraries in a
+# subdirectory and put it on LD_LIBRARY_PATH from a wrapper script (PHD2 does
+# this for its camera SDKs in /usr/lib/phd2), and a sanity check does not need
+# to model the loader's search order to catch a library that is nowhere at all.
+SONAME_INDEX=${SONAME_INDEX:-$(mktemp)}
+build_soname_index() {
+  sudo find "$ROOT_MNT/usr/lib" "$ROOT_MNT/usr/lib64" "$ROOT_MNT/lib" \
+    -name '*.so*' -printf '%f\n' 2>/dev/null | sort -u > "$SONAME_INDEX"
+}
+
+# check_links <description> <path relative to root>
+#
+# `check` only proves that a file is there. A binary can be present and still
+# refuse to start, because the repo it was built against has moved on to a new
+# library soname: when Arch went from opencv 4 to opencv 5 every
+# libopencv_*.so.413 became .so.500, and any prebuilt package that was not
+# rebuilt keeps asking for the old name. pacman does not catch it either when
+# the package fails to declare the dependency, so the build succeeds and the
+# breakage only shows up the first time a user launches the program.
+#
+# readelf parses aarch64 ELF headers on any host, so this needs neither a
+# chroot nor QEMU.
+check_links() {
+  local desc="$1" rel file needed missing="" n=0 soname
+  rel=$(resolve_in_root "/$2")
+  file="$ROOT_MNT$rel"
+
+  if ! sudo test -f "$file"; then
+    fail "$desc links (missing $2)"
+    return
+  fi
+  if [ "$(sudo dd if="$file" bs=4 count=1 status=none | od -An -tx1 | tr -d ' \n')" != "7f454c46" ]; then
+    # /usr/bin/phd2 is a shell wrapper around /usr/bin/phd2.bin, not an ELF.
+    warn "$desc links: $2 is not an ELF binary, skipped"
+    return
+  fi
+
+  needed=$(sudo readelf -d "$file" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort -u)
+  if [ -z "$needed" ]; then
+    # Either readelf is missing from the runner or the file is statically
+    # linked. Both are worth a look, and neither is something to pass silently.
+    warn "$desc links: no DT_NEEDED entries read from $2"
+    return
+  fi
+
+  for soname in $needed; do
+    n=$((n + 1))
+    grep -qxF "$soname" "$SONAME_INDEX" || missing="$missing $soname"
+  done
+
+  if [ -z "$missing" ]; then
+    pass "$desc links: $n shared libraries all resolve"
+  else
+    # Truncated, because a single stale opencv link accounts for 57 entries and
+    # would bury every other check in the report.
+    local count
+    count=$(printf '%s\n' $missing | wc -l | tr -d ' ')
+    fail "$desc links: $count of $n shared libraries are not in the image"
+    printf '%s\n' $missing | sort | sed -n '1,8s/^/          /p'
+    if [ "$count" -gt 8 ]; then
+      printf '          ... and %s more\n' "$((count - 8))"
+    fi
+  fi
+}
+
 cleanup() {
   sudo umount "$BOOT_MNT" 2>/dev/null || true
   sudo umount "$ROOT_MNT" 2>/dev/null || true
+  rm -f "$SONAME_INDEX"
 }
 trap cleanup EXIT
 
@@ -197,6 +264,15 @@ check "indiserver"    usr/bin/indiserver
 check "solve-field"   usr/bin/solve-field
 check_warn "noVNC"    usr/share/webapps/novnc
 check_warn "x0vncserver" usr/bin/x0vncserver
+
+echo
+echo "== shared library resolution =="
+build_soname_index
+echo "  $(wc -l < "$SONAME_INDEX" | tr -d ' ') sonames indexed under /usr/lib, /usr/lib64 and /lib"
+check_links "KStars"     usr/bin/kstars
+check_links "PHD2"       usr/bin/phd2.bin
+check_links "indiserver" usr/bin/indiserver
+check_links "solve-field" usr/bin/solve-field
 
 idx_dir="$ROOT_MNT/home/astronaut/.local/share/kstars/astrometry"
 if sudo test -d "$idx_dir"; then
